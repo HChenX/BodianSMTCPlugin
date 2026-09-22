@@ -86,6 +86,34 @@ build\media_key_detector_windows_plugin.dll
 
 ## 安装
 
+DLL 有两种装法：从 Releases 下载预编译产物手动替换（免构建），或自行构建后用安装脚本部署。
+
+### 方式一：手动替换（免构建）
+
+从 [Releases](https://github.com/HChenX/BodianSMTCPlugin/releases) 下载 `media_key_detector_windows_plugin.dll`。下文将客户端安装目录记为 `<安装目录>`，其下应存在 `bodian_pc.exe`。
+
+**安装**
+
+1. 完全退出波点音乐，并在任务管理器中确认无 `bodian_pc.exe` 残留
+2. 将 `<安装目录>\media_key_detector_windows_plugin.dll` 重命名为 `media_key_detector_windows_plugin_orig.dll`，完成备份
+3. 将下载的 DLL 复制到 `<安装目录>\media_key_detector_windows_plugin.dll`
+
+**还原**
+
+1. 完全退出波点音乐
+2. 删除 `<安装目录>\media_key_detector_windows_plugin.dll`
+3. 将 `<安装目录>\media_key_detector_windows_plugin_orig.dll` 改回 `media_key_detector_windows_plugin.dll`
+
+> 备份只需做一次。若目录下已存在 `_orig.dll`，说明此前已备份，跳过第 2 步，切勿重复重命名 —— 否则会用插件的 DLL 覆盖掉真正的原版备份。
+
+校验下载文件完整性（哈希值见对应 Release 说明）：
+
+```bash
+certutil -hashfile media_key_detector_windows_plugin.dll SHA256
+```
+
+### 方式二：安装脚本（需先自行构建）
+
 ```bash
 powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
 ```
