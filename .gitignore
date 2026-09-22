@@ -1,0 +1,41 @@
+# 构建产物 (CMake + Ninja)
+/build/
+build/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+build.ninja
+rules.ninja
+.ninja_deps
+.ninja_log
+compile_commands.json
+
+# MSVC 二进制产物
+*.dll
+*.lib
+*.exp
+*.pdb
+*.ilk
+*.obj
+*.exe
+*.idb
+*.res
+
+# 开发期探针程序，不参与插件构建
+test_*.cpp
+test_cover.jpg
+
+# 本机工具链路径，由 init_env.ps1 自动加载
+toolchain.local.ps1
+
+# 运行时日志
+*.log
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo

@@ -1,0 +1,3 @@
+LIBRARY media_key_detector_windows_plugin
+EXPORTS
+    MediaKeyDetectorWindowsRegisterWithRegistrar
