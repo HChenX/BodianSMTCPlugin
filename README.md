@@ -141,69 +141,11 @@ EndTime:     00:04:05.6780000
 
 ## 工作原理
 
-### 1. DLL 代理与初始化时机
-
-[src/main.cpp](src/main.cpp) 为代理入口。
-
-- `DllMain` 不进行实质初始化：此时进程持有 Loader Lock，调用 `LoadLibraryW` 或 MinHook 会导致死锁。
-- 实际初始化位于 `MediaKeyDetectorWindowsRegisterWithRegistrar`：先由 `LoadOriginalPlugin()` 加载 `_orig.dll` 并转发调用，再以 `SetTimer` 投递 800ms 间隔的定时器。
-- 定时器回调枚举本进程顶层窗口，匹配类名 `BODIAN_FLUTTER_WIN32_WINDOW`（回退 `FLUTTER_RUNNER_WIN32_WINDOW`），命中后调用 `SmtcManager::InitializeOnUIThread`，最多重试 30 次。
-
-`GetForWindow` 要求句柄对应的窗口已创建，且必须在窗口消息循环所在线程调用；`SetTimer(NULL, ...)` 的回调运行于该线程的消息循环，故以此方式延迟初始化。
-
-### 2. SMTC 挂载
-
-[src/SmtcManager.cpp](src/SmtcManager.cpp)：
-
-1. `RegisterAppUserModel()` 在 `HKCU\Software\Classes\AppUserModelId\Tencent.BodianMusic.PC` 写入 `DisplayName` / `IconUri`，并创建带 `PKEY_AppUserModel_ID` 的开始菜单快捷方式。缺少该步骤时媒体卡片显示进程名。
-2. `SetWindowAppId()` 经 `SHGetPropertyStoreForWindow` 将 `AppUserModelId` 写入窗口属性。
-3. `ISystemMediaTransportControlsInterop::GetForWindow()` 获取窗口的 SMTC 实例，先试根窗口，失败再试子窗口。
-4. 启用播放 / 暂停 / 上一首 / 下一首 / 停止，注册 `ButtonPressed` 与 `PlaybackPositionChangeRequested` 回调。
-5. 通过 `DisplayUpdater` 提交元数据与时间轴。
-
-**控制回传**：`ButtonPressed` 不使用 Flutter MethodChannel，而以 `SendInput` 注入标准媒体键（`VK_MEDIA_PLAY_PAUSE`、`VK_MEDIA_NEXT_TRACK` 等），交由客户端自身的媒体键监听逻辑处理。
-
-**进度跳转**：`PlaybackPositionChangeRequested` 取得目标毫秒数后调用 `MpvManager::Seek()`，写入 mpv 的 `time-pos` 属性。
-
-### 3. 数据来源
-
-[src/MetadataWatcher.cpp](src/MetadataWatcher.cpp) 维护一个常驻工作线程，主循环周期 200ms。
-
-**进度与播放状态（mpv）**
-
-[src/MpvManager.cpp](src/MpvManager.cpp) 使用 MinHook 挂钩以下导出函数：
-
-- `libmpv-2.dll` 的 `mpv_create` / `mpv_destroy` / `mpv_terminate_destroy`，在播放器实例创建时保存 `mpv_handle`
-- `media_kit_native_event_loop.dll` 的 `MediaKitEventLoopHandlerRegister` / `Dispose`，作为 `libmpv-2.dll` 尚未加载时的回退路径
-
-取得句柄后，每轮循环通过 `mpv_get_property` 读取 `time-pos`、`duration`、`pause`。状态判断优先采用 mpv 的 `pause`；不可读时回退至 `CheckAudioPlaying()`：经 WASAPI（`IMMDeviceEnumerator` → `IAudioSessionManager2`）遍历音频会话，判断本进程会话是否为 `AudioSessionStateActive`。
-
-**曲目信息（客户端数据库）**
-
-以只读方式打开客户端的 SQLite 库：
-
-```
-%LOCALAPPDATA%\cn.wenyu.bodian\bodian_pc\database\songDB.db
-```
-
-读取 `hist_song` 表中 `ord` 最大的记录，解析 `json` 字段的 `name` / `artist` / `album` / `albumPic` / `duration`。`sqlite3.dll` 于运行时 `LoadLibrary` 动态解析，不参与链接。查询周期 600ms（每 3 轮循环一次），`ord` 变化时判定为切歌。
-
-**进度同步策略**：每轮将 mpv 的 `time-pos` 与「上次上报位置 + 已过时间」比较。
-
-- 偏差 > 400ms：判定为进度跳转，立即同步
-- 否则每满 1 秒同步一次
-
-### 4. 封面转换
-
-封面缓存在：
-
-```
-%APPDATA%\cn.wenyu.bodian\bodian_pc\artwork_cache\
-```
-
-文件名为封面 URL 的 MD5 加 `.img` 后缀，内容为 webp。SMTC 不支持 webp，故 [SmtcManager.cpp](src/SmtcManager.cpp) 的 `ConvertWebpToJpeg()` 使用 WIC 解码 webp 并编码为 JPEG，输出至 `%TEMP%\bodian_current_cover.jpg`，再经 `RandomAccessStreamReference::CreateFromFile` 提交给 `DisplayUpdater.Thumbnail()`。
-
-若按 MD5 未命中缓存文件，回退为取该目录下最后修改的 `.img`。
+- **初始化时机**：`DllMain` 不做实质工作 —— 此时进程持有 Loader Lock，加载 DLL 或安装挂钩会死锁。真正的初始化推迟到窗口就绪后：以 800ms 间隔的定时器轮询本进程窗口，匹配类名 `BODIAN_FLUTTER_WIN32_WINDOW` 后，在该窗口消息循环所在线程调用 `GetForWindow` 挂载 SMTC。
+- **曲目信息**：只读打开客户端 SQLite 库 `%LOCALAPPDATA%\cn.wenyu.bodian\bodian_pc\database\songDB.db`，读取 `hist_song` 表中 `ord` 最大的记录，查询周期 600ms。
+- **播放进度与状态**：MinHook 挂钩 `libmpv-2.dll` 的 `mpv_create` 以取得 `mpv_handle`，每 200ms 经 `mpv_get_property` 读取 `time-pos` / `duration` / `pause`；不可读时回退至 WASAPI 音频会话状态判断。
+- **封面**：缓存在 `%APPDATA%\cn.wenyu.bodian\bodian_pc\artwork_cache\`，文件名为封面 URL 的 MD5 加 `.img` 后缀，内容为 webp；由 WIC 转为 JPEG 后提交给 SMTC。
+- **控制回传**：以 `SendInput` 注入标准媒体键实现，不使用 Flutter MethodChannel。
 
 ## 项目结构
 
@@ -234,26 +176,14 @@ BodianSMTCPlugin/
 
 ## 排错
 
-插件日志写入波点音乐安装目录下的 `smtc_plugin.log`，同时经 `OutputDebugStringW` 输出，可用 DebugView 实时查看。日志覆盖初始化各阶段与每次切歌。
+插件日志写入波点音乐安装目录下的 `smtc_plugin.log`，同时经 `OutputDebugStringW` 输出，可用 DebugView 实时查看。排查时先读该文件，其中的关键节点：
 
-| 现象 | 排查方向 |
-|---|---|
-| 媒体卡片完全不出现 | 日志中检索 `SMTC successfully initialized`。若不存在，查看 `GetForWindow failed with HRESULT`，通常为窗口未找到或窗口类名变更 |
-| 卡片出现但显示进程名 | `RegisterAppUserModel` 失败。检查 `HKCU\Software\Classes\AppUserModelId\Tencent.BodianMusic.PC` 是否写入成功、开始菜单快捷方式是否创建 |
-| 有歌名但进度条不动 | mpv 挂钩未生效。检索 `Hook_mpv_create captured handle`；无此日志说明 `libmpv-2.dll` 加载时机过晚或导出符号变更 |
-| 进度条会动但无法拖动 | `PlaybackPositionChangeRequested` 未触发，或 `MpvManager::Seek` 返回负值（日志含 `MpvManager::Seek to ... err=`） |
-| 卡片没有封面 | 检索 `ConvertWebpToJpeg failed`，并确认 `%TEMP%\bodian_current_cover.jpg` 是否生成 |
-| 客户端启动崩溃 | 运行 `scripts\check_crash.ps1` 查看事件查看器记录；确认 `_orig.dll` 存在且完整 |
-| 构建报工具链探测失败 | 检查 `-MsvcRoot` / `toolchain.local.ps1` / `BODIAN_MSVC_ROOT` 是否指向正确的工具链根目录，或确认已安装 Visual Studio 的 C++ 工作负载 |
-| 安装报 DLL 被占用 | 手动退出波点音乐后重新执行安装脚本 |
+- `SMTC successfully initialized` —— 未出现表示 SMTC 未挂载，继续查同文件中的 `GetForWindow failed with HRESULT`
+- `Hook_mpv_create captured handle` —— 未出现表示 mpv 挂钩未生效，播放进度将不更新
+- `ConvertWebpToJpeg failed` —— 封面转换失败
+- `MpvManager::Seek to ... err=` —— 进度拖动失败
 
-## 已知限制
-
-- **仅 x64**。实现使用 `hde64` 反汇编引擎，不支持 32 位。
-- **与客户端版本强绑定**。以下任一变更均可能导致失效：窗口类名 `BODIAN_FLUTTER_WIN32_WINDOW`、数据库路径、`artwork_cache` 目录结构、`libmpv-2.dll` / `media_kit_native_event_loop.dll` 的导出符号名。
-- 挂钩生效依赖目标模块**已被加载**。若插件注册时 `libmpv-2.dll` 尚未进内存，该挂钩点将丢失，退化为依赖 MediaKit 事件循环 DLL 的路径。
-- 曲目信息依赖客户端数据库的 JSON 结构，字段名变更后无法读取。
-- 未处理多播放器实例 / 多窗口场景，`m_activeHandle` 仅保留最后创建的 mpv 实例。
+若客户端版本更新后整体失效，通常是窗口类名、数据库路径或 `libmpv-2.dll` 的导出符号发生了变化。
 
 ## 第三方组件
 
